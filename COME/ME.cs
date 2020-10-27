@@ -420,8 +420,7 @@ namespace COME
                     {
                         if (isMarketOrder || order.TimeInForce == OrderTimeInForce.IOC || order.TimeInForce == OrderTimeInForce.FOK)
                         {
-                            order.Status = order.PendingQuantity == order.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
-                            //orderIndexer.Remove(order.ID);
+                            order.Status = order.PendingQuantity == order.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled; 
                             response.UpdatedSellOrders.Add(order);
                         }
                         else
@@ -843,13 +842,17 @@ namespace COME
             {
                 this.statistic.Book = this.BuyPrice_Level.Count + this.SellPrice_Level.Count;
                 this.statistic.LastEventTime = this.LastEventTime;
+               
+                int stopCount = 0, activeCount = 0;
                 foreach (var index in this.OrderIndexer.Values)
                 {
                     if (index.IsStopOrder)
-                        this.statistic.StopOrders++;
+                        stopCount++;
                     else
-                        this.statistic.ActiveOrders++;
-                }
+                        activeCount++;
+                } 
+                this.statistic.StopOrders = stopCount;
+                this.statistic.ActiveOrders = activeCount;
 
                 return this.statistic;
             }
