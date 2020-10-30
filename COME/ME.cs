@@ -35,6 +35,16 @@ namespace COME
         readonly SemaphoreSlim match_semaphore = new SemaphoreSlim(1, 1);
         readonly int timeout_In_Millisec = 5000;
         const decimal Zero = 0M;
+        const string all = "all";
+
+        const string match = "match";
+        const string cancellation = "cancellation";
+        const string updation = "updation";
+        const string dump_init = "dump_init";
+        const string dump = "dump";
+        const string dump_complete = "dump_complete";
+
+        readonly MatchResponse ResponseBuffer = new MatchResponse();
 
 
         readonly SortedDictionary<decimal, Level> BuyPrice_Level = new SortedDictionary<decimal, Level>();
@@ -55,6 +65,8 @@ namespace COME
             this.symbol = symbol;
             this.decimal_precision = precision;
             this.dust_size = dustSize;
+
+
 
             this.request_cancellation_channel = string.Concat(this.symbol, ".request.cancellation");
             this.request_neworder_channel = string.Concat(this.symbol, ".request.neworder");
@@ -89,6 +101,9 @@ namespace COME
             };
 
             var currentTime = DateTime.UtcNow;
+
+            this.ResponseBuffer.Symbol = this.symbol; 
+
             var dueDay = currentTime == currentTime.Date ? currentTime.Date : currentTime.Date.AddDays(1);
             zero_O_Clock_Timer = new Timer(CancelAll_DO_Orders_Callback, null, TimeSpan.FromMilliseconds((dueDay - currentTime).TotalMilliseconds), TimeSpan.FromDays(1)); //every day 
             one_Sec_Timer = new Timer(One_Sec_Timer_Callback, null, TimeSpan.FromMilliseconds(timeout_In_Millisec), TimeSpan.FromSeconds(1)); //every sec 
@@ -105,12 +120,10 @@ namespace COME
                 this.statistic.Submission++;
                 var currentTimestamp = DateTime.UtcNow;
 
-                MatchResponse response = new MatchResponse
-                {
-                    Symbol = this.symbol,
-                    EventTS = currentTimestamp
-                };
 
+                this.ResponseBuffer.EventTS = currentTimestamp;
+                this.ResponseBuffer.EventID = order.ID;
+                this.ResponseBuffer.EventType = match; 
 
                 if (StopOrderTypes.Contains(order.Type))
                 {
@@ -122,7 +135,7 @@ namespace COME
                             order.AcceptedOn = currentTimestamp;
                             order.ModifiedOn = currentTimestamp;
 
-                            response.UpdatedBuyOrders.Add((Order)order.Clone());
+                            this.ResponseBuffer.UpdatedBuyOrders.Add((Order)order.Clone());
 
                             if (order.TriggerPrice <= last_Trade_Price) // buy order :  market price is already breaching trigger price 
                             {
@@ -150,7 +163,7 @@ namespace COME
                             order.AcceptedOn = currentTimestamp;
                             order.ModifiedOn = currentTimestamp;
 
-                            response.UpdatedSellOrders.Add((Order)order.Clone());
+                            this.ResponseBuffer.UpdatedSellOrders.Add((Order)order.Clone());
 
                             if (order.TriggerPrice >= last_Trade_Price) // sell order :  market price is already breaching trigger price 
                             {
@@ -192,7 +205,7 @@ namespace COME
 
                 if (order.Side == OrderSide.Buy)
                 {
-                    response.UpdatedBuyOrders.Add((Order)order.Clone());
+                    this.ResponseBuffer.UpdatedBuyOrders.Add((Order)order.Clone());
 
                     if (!(order.TimeInForce == OrderTimeInForce.FOK && SellPrice_Level.TakeWhile(x => x.Key <= order.Price).Sum(x => x.Value.TotalSize) < order.PendingQuantity))
                         while (order.PendingQuantity > Zero && SellPrice_Level.Count > 0)
@@ -215,10 +228,10 @@ namespace COME
                                 {
                                     sellOrder.Status = OrderStatus.PartiallyCancelled;
                                     OrderIndexer.Remove(sellOrder.ID);
-                                    response.UpdatedSellOrders.Add(sellOrder);
+                                    this.ResponseBuffer.UpdatedSellOrders.Add(sellOrder);
 
                                     level.TotalSize -= sellOrder.PendingQuantity;
-                                    response.UpdatedSellOrderBook[sellOrder.Price] = level.TotalSize;
+                                    this.ResponseBuffer.UpdatedSellOrderBook[sellOrder.Price] = level.TotalSize;
 
                                     this.statistic.DustOrders++;
                                 }
@@ -235,7 +248,7 @@ namespace COME
                                     order.ModifiedOn = currentTime;
 
                                     level.TotalSize -= tradeSize;
-                                    response.UpdatedSellOrderBook[sellOrder.Price] = level.TotalSize;
+                                    this.ResponseBuffer.UpdatedSellOrderBook[sellOrder.Price] = level.TotalSize;
 
                                     var trade = new Trade
                                     {
@@ -248,9 +261,9 @@ namespace COME
                                         BuyerID = order.UserID,
                                         SellerID = sellOrder.UserID,
                                     };
-                                    response.UpdatedBuyOrders.Add((Order)order.Clone());
-                                    response.UpdatedSellOrders.Add((Order)sellOrder.Clone());
-                                    response.NewTrades.Add(trade);
+                                    this.ResponseBuffer.UpdatedBuyOrders.Add((Order)order.Clone());
+                                    this.ResponseBuffer.UpdatedSellOrders.Add((Order)sellOrder.Clone());
+                                    this.ResponseBuffer.NewTrades.Add(trade);
 
                                     last_Trade_Price = trade.Price;
 
@@ -291,7 +304,7 @@ namespace COME
                         if (isMarketOrder || order.TimeInForce == OrderTimeInForce.IOC || order.TimeInForce == OrderTimeInForce.FOK)
                         {
                             order.Status = order.PendingQuantity == order.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
-                            response.UpdatedBuyOrders.Add(order);
+                            this.ResponseBuffer.UpdatedBuyOrders.Add(order);
                         }
                         else
                         {
@@ -301,14 +314,14 @@ namespace COME
                                 level.Orders.AddLast(order);
 
                                 level.TotalSize += order.PendingQuantity;
-                                response.UpdatedBuyOrderBook[order.Price] = level.TotalSize;
+                                this.ResponseBuffer.UpdatedBuyOrderBook[order.Price] = level.TotalSize;
                             }
                             else
                             {
                                 level = new Level { Orders = new LinkedList<Order>(new List<Order> { order }), TotalSize = order.PendingQuantity };
 
                                 BuyPrice_Level[order.Price] = level;
-                                response.UpdatedBuyOrderBook[order.Price] = level.TotalSize;
+                                this.ResponseBuffer.UpdatedBuyOrderBook[order.Price] = level.TotalSize;
                             }
 
                             OrderIndexer.TryAdd(order.ID, new OrderPointer { IsStopOrder = false, Price = order.Price, Side = order.Side });
@@ -319,7 +332,7 @@ namespace COME
                 }
                 else
                 {
-                    response.UpdatedSellOrders.Add((Order)order.Clone());
+                    this.ResponseBuffer.UpdatedSellOrders.Add((Order)order.Clone());
                     if (!(order.TimeInForce == OrderTimeInForce.FOK && BuyPrice_Level.SkipWhile(x => x.Key < order.Price).Sum(x => x.Value.TotalSize) < order.PendingQuantity))
                         while (order.PendingQuantity > Zero && BuyPrice_Level.Count > 0)
                         {
@@ -343,10 +356,10 @@ namespace COME
                                 {
                                     buyOrder.Status = OrderStatus.PartiallyCancelled;
                                     OrderIndexer.Remove(buyOrder.ID);
-                                    response.UpdatedBuyOrders.Add(buyOrder);
+                                    this.ResponseBuffer.UpdatedBuyOrders.Add(buyOrder);
 
                                     level.TotalSize -= buyOrder.PendingQuantity;
-                                    response.UpdatedBuyOrderBook[buyOrder.Price] = level.TotalSize;
+                                    this.ResponseBuffer.UpdatedBuyOrderBook[buyOrder.Price] = level.TotalSize;
 
                                     this.statistic.DustOrders++;
                                 }
@@ -364,7 +377,7 @@ namespace COME
 
 
                                     level.TotalSize -= tradeSize;
-                                    response.UpdatedBuyOrderBook[buyOrder.Price] = level.TotalSize;
+                                    this.ResponseBuffer.UpdatedBuyOrderBook[buyOrder.Price] = level.TotalSize;
 
                                     var trade = new Trade
                                     {
@@ -378,9 +391,9 @@ namespace COME
                                         BuyerID = buyOrder.UserID,
                                     };
 
-                                    response.UpdatedSellOrders.Add((Order)order.Clone());
-                                    response.UpdatedBuyOrders.Add((Order)buyOrder.Clone());
-                                    response.NewTrades.Add(trade);
+                                    this.ResponseBuffer.UpdatedSellOrders.Add((Order)order.Clone());
+                                    this.ResponseBuffer.UpdatedBuyOrders.Add((Order)buyOrder.Clone());
+                                    this.ResponseBuffer.NewTrades.Add(trade);
 
                                     last_Trade_Price = trade.Price;
 
@@ -420,8 +433,8 @@ namespace COME
                     {
                         if (isMarketOrder || order.TimeInForce == OrderTimeInForce.IOC || order.TimeInForce == OrderTimeInForce.FOK)
                         {
-                            order.Status = order.PendingQuantity == order.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled; 
-                            response.UpdatedSellOrders.Add(order);
+                            order.Status = order.PendingQuantity == order.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
+                            this.ResponseBuffer.UpdatedSellOrders.Add(order);
                         }
                         else
                         {
@@ -430,14 +443,14 @@ namespace COME
                                 level.Orders.AddLast(order);
 
                                 level.TotalSize += order.PendingQuantity;
-                                response.UpdatedSellOrderBook[order.Price] = level.TotalSize;
+                                this.ResponseBuffer.UpdatedSellOrderBook[order.Price] = level.TotalSize;
                             }
                             else
                             {
                                 level = new Level { Orders = new LinkedList<Order>(new List<Order> { order }), TotalSize = order.PendingQuantity };
 
                                 SellPrice_Level[order.Price] = level;
-                                response.UpdatedSellOrderBook[order.Price] = level.TotalSize;
+                                this.ResponseBuffer.UpdatedSellOrderBook[order.Price] = level.TotalSize;
                             }
 
                             OrderIndexer.TryAdd(order.ID, new OrderPointer { IsStopOrder = false, Price = order.Price, Side = order.Side });
@@ -448,12 +461,12 @@ namespace COME
                 }
 
                 if (min_trade_price != Zero && max_trade_price != Zero)
-                    ActivateStopOrdersAndEnqueueForMatch(min_trade_price, max_trade_price, response);
+                    ActivateStopOrdersAndEnqueueForMatch(min_trade_price, max_trade_price);
 
                 Finished:
                 this.statistic.CurrentMarketPrice = this.last_Trade_Price;
                 this.LastEventTime = currentTimestamp;
-                await PublishMatchAsync(response);
+                await PublishResponseAsync();
                 return (true, RequestStatus.Processed, string.Empty);
             }
             catch (Exception ex)
@@ -470,7 +483,7 @@ namespace COME
 
         }
 
-        public void ActivateStopOrdersAndEnqueueForMatch(decimal min_trade_price, decimal max_trade_price, MatchResponse response)
+        public void ActivateStopOrdersAndEnqueueForMatch(decimal min_trade_price, decimal max_trade_price)
         {
 
             var currentTime = DateTime.UtcNow;
@@ -538,11 +551,9 @@ namespace COME
                 this.statistic.Cancellation++;
                 var currentTimestamp = DateTime.UtcNow;
 
-                MatchResponse response = new MatchResponse
-                {
-                    Symbol = this.symbol,
-                    EventTS = currentTimestamp
-                };
+                this.ResponseBuffer.EventTS = currentTimestamp; 
+                this.ResponseBuffer.EventID = orderID;
+                this.ResponseBuffer.EventType = cancellation;
 
                 if (pointer.IsStopOrder)
                 {
@@ -562,7 +573,7 @@ namespace COME
 
                                 orderToBeCancelled.Status = orderToBeCancelled.PendingQuantity == orderToBeCancelled.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
                                 orderToBeCancelled.ModifiedOn = currentTimestamp;
-                                response.UpdatedBuyOrders.Add(orderToBeCancelled);
+                                this.ResponseBuffer.UpdatedBuyOrders.Add(orderToBeCancelled);
                             }
                         }
                     }
@@ -581,7 +592,7 @@ namespace COME
 
                                 orderToBeCancelled.Status = orderToBeCancelled.PendingQuantity == orderToBeCancelled.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
                                 orderToBeCancelled.ModifiedOn = currentTimestamp;
-                                response.UpdatedSellOrders.Add(orderToBeCancelled);
+                                this.ResponseBuffer.UpdatedSellOrders.Add(orderToBeCancelled);
                             }
                         }
                     }
@@ -606,7 +617,7 @@ namespace COME
 
                                 orderToBeCancelled.Status = orderToBeCancelled.PendingQuantity == orderToBeCancelled.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
                                 orderToBeCancelled.ModifiedOn = currentTimestamp;
-                                response.UpdatedBuyOrders.Add(orderToBeCancelled);
+                                this.ResponseBuffer.UpdatedBuyOrders.Add(orderToBeCancelled);
                             }
                         }
                     }
@@ -627,13 +638,13 @@ namespace COME
 
                                 orderToBeCancelled.Status = orderToBeCancelled.PendingQuantity == orderToBeCancelled.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
                                 orderToBeCancelled.ModifiedOn = currentTimestamp;
-                                response.UpdatedSellOrders.Add(orderToBeCancelled);
+                                this.ResponseBuffer.UpdatedSellOrders.Add(orderToBeCancelled);
                             }
                         }
                     }
                 }
                 this.LastEventTime = currentTimestamp;
-                await PublishMatchAsync(response);
+                await PublishResponseAsync();
 
                 OrderIndexer.Remove(orderID); //// remove from index as order was cancelled 
 
@@ -661,7 +672,7 @@ namespace COME
         //    {
         //        if (string.IsNullOrWhiteSpace(updateOrder.ID))
         //            return (false, RequestStatus.Rejected, $"rejected : invalid order `id` supplied.");
-        //        if (!OrderIndexer.TryGetValue(updateOrder.ID, out var pointer) || pointer == null) 
+        //        if (!OrderIndexer.TryGetValue(updateOrder.ID, out var pointer) || pointer == null)
         //            return (false, RequestStatus.Rejected, $"rejected : no order with `id` {updateOrder.ID} found.");
 
 
@@ -763,7 +774,7 @@ namespace COME
         //            }
         //        }
         //        this.LastEventTime = currentTimestamp;
-        //        await PublishMatchAsync(response);
+        //        await PublishMatchAsync();
         //        return (true, RequestStatus.Processed, string.Empty);
         //    }
         //    catch (Exception ex)
@@ -780,9 +791,23 @@ namespace COME
         //    }
         //}
 
-        async Task PublishMatchAsync(MatchResponse response)
+        async Task PublishResponseAsync()
         {
-            await this.Connection.GetSubscriber().PublishAsync(this.response_channel, response.SerializeObject(isFormattingIntended: false));
+            await this.Connection.GetSubscriber().PublishAsync(this.response_channel, this.ResponseBuffer.SerializeObject(isFormattingIntended: false));
+            this.ResetResponseBuffer();
+        }
+        
+        void ResetResponseBuffer()
+        {
+            this.ResponseBuffer.EventID = null;
+            this.ResponseBuffer.EventTS = DateTime.MinValue;
+            this.ResponseBuffer.EventType = null;
+            this.ResponseBuffer.NewTrades.Clear();
+            this.ResponseBuffer.To= all;
+            this.ResponseBuffer.UpdatedBuyOrders.Clear();
+            this.ResponseBuffer.UpdatedSellOrders.Clear();
+            this.ResponseBuffer.UpdatedBuyOrderBook.Clear();
+            this.ResponseBuffer.UpdatedSellOrderBook.Clear();  
         }
 
         async void CancelAll_DO_Orders_Callback(object state)

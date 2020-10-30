@@ -17,7 +17,7 @@ namespace COME.Models
         {
             this.TimeStamp = dateTime ?? DateTime.UtcNow;
         }
-        //public string ID { get; set; }
+        public string ID { get; set; } = Guid.NewGuid().ToString();
        // public string Symbol { get; set; }
         public string BuyerID { get; set; }
         public string SellerID { get; set; }
