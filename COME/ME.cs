@@ -94,9 +94,9 @@ namespace COME
             one_Sec_Timer = new Timer(One_Sec_Timer_Callback, null, TimeSpan.FromMilliseconds(timeout_In_Millisec), TimeSpan.FromSeconds(1)); //every sec 
         }
 
-        public async Task<(bool isProcessed, RequestStatus requestStatus, string message)> AcceptOrderAndProcessMatchAsync(Order order, bool force = false)
+        public async Task<(bool isProcessed, RequestStatus requestStatus, string message)> AcceptOrderAndProcessMatchAsync(Order order, bool force = false,bool accuireLock=true)
         {
-            if (!await match_semaphore.WaitAsync(force ? timeout_In_Millisec * 10 : timeout_In_Millisec)) //for overload protection
+            if (accuireLock && !await match_semaphore.WaitAsync(force ? timeout_In_Millisec * 10 : timeout_In_Millisec)) //for overload protection
                 return (false, RequestStatus.Timeout, $"rejected : timeout of {timeout_In_Millisec} millisec elapsed.");
 
 
@@ -531,7 +531,7 @@ namespace COME
             {
                 if (string.IsNullOrWhiteSpace(orderID))
                     return (false, RequestStatus.Rejected, $"rejected : invalid `orderID` supplied.");
-                if (!OrderIndexer.TryGetValue(orderID, out var pointer) || pointer == null)//Find order from and instantly remove it 
+                if (!OrderIndexer.TryGetValue(orderID, out var pointer) || pointer == null)
                     return (false, RequestStatus.Rejected, $"rejected : no order with `orderID` {orderID} found.");
 
 
@@ -634,6 +634,9 @@ namespace COME
                 }
                 this.LastEventTime = currentTimestamp;
                 await PublishMatchAsync(response);
+
+                OrderIndexer.Remove(orderID); //// remove from index as order was cancelled 
+
                 return (true, RequestStatus.Processed, string.Empty);
             }
             catch (Exception ex)
@@ -658,7 +661,7 @@ namespace COME
         //    {
         //        if (string.IsNullOrWhiteSpace(updateOrder.ID))
         //            return (false, RequestStatus.Rejected, $"rejected : invalid order `id` supplied.");
-        //        if (!OrderIndexer.TryGetValue(updateOrder.ID, out var pointer) || pointer == null)//Find order from and instantly remove it 
+        //        if (!OrderIndexer.TryGetValue(updateOrder.ID, out var pointer) || pointer == null) 
         //            return (false, RequestStatus.Rejected, $"rejected : no order with `id` {updateOrder.ID} found.");
 
 
