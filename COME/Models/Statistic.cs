@@ -17,6 +17,7 @@ namespace COME.Models
         public int StopActivation { get; set; }
         public int Trades { get; set; }
         public int Cancellation { get; set; }
+        public int Updation { get; set; }
         public int Book { get; set; }
         public int ActiveOrders { get; set; }
         public int StopOrders { get; set; }

@@ -44,10 +44,10 @@ namespace COME
         const string dump = "dump";
         const string dump_complete = "dump_complete";
 
-        readonly MatchResponse ResponseBuffer = new MatchResponse();
+        readonly MatchResponse ResponseBuffer;
 
 
-        readonly SortedDictionary<decimal, Level> BuyPrice_Level = new SortedDictionary<decimal, Level>();
+        readonly SortedDictionary<decimal, Level> BuyPrice_Level = new SortedDictionary<decimal, Level>(new DescendingComparer<decimal>());
         readonly SortedDictionary<decimal, Level> SellPrice_Level = new SortedDictionary<decimal, Level>();
 
 
@@ -66,6 +66,7 @@ namespace COME
             this.decimal_precision = precision;
             this.dust_size = dustSize;
 
+            this.ResponseBuffer = new MatchResponse(this.symbol);
 
 
             this.request_cancellation_channel = string.Concat(this.symbol, ".request.cancellation");
@@ -102,14 +103,13 @@ namespace COME
 
             var currentTime = DateTime.UtcNow;
 
-            this.ResponseBuffer.Symbol = this.symbol; 
 
             var dueDay = currentTime == currentTime.Date ? currentTime.Date : currentTime.Date.AddDays(1);
             zero_O_Clock_Timer = new Timer(CancelAll_DO_Orders_Callback, null, TimeSpan.FromMilliseconds((dueDay - currentTime).TotalMilliseconds), TimeSpan.FromDays(1)); //every day 
             one_Sec_Timer = new Timer(One_Sec_Timer_Callback, null, TimeSpan.FromMilliseconds(timeout_In_Millisec), TimeSpan.FromSeconds(1)); //every sec 
         }
 
-        public async Task<(bool isProcessed, RequestStatus requestStatus, string message)> AcceptOrderAndProcessMatchAsync(Order order, bool force = false,bool accuireLock=true)
+        public async Task<(bool isProcessed, RequestStatus requestStatus, string message)> AcceptOrderAndProcessMatchAsync(Order order, bool accuireLock = true, bool force = false)
         {
             if (accuireLock && !await match_semaphore.WaitAsync(force ? timeout_In_Millisec * 10 : timeout_In_Millisec)) //for overload protection
                 return (false, RequestStatus.Timeout, $"rejected : timeout of {timeout_In_Millisec} millisec elapsed.");
@@ -123,7 +123,7 @@ namespace COME
 
                 this.ResponseBuffer.EventTS = currentTimestamp;
                 this.ResponseBuffer.EventID = order.ID;
-                this.ResponseBuffer.EventType = match; 
+                this.ResponseBuffer.EventType = match;
 
                 if (StopOrderTypes.Contains(order.Type))
                 {
@@ -333,10 +333,10 @@ namespace COME
                 else
                 {
                     this.ResponseBuffer.UpdatedSellOrders.Add((Order)order.Clone());
-                    if (!(order.TimeInForce == OrderTimeInForce.FOK && BuyPrice_Level.SkipWhile(x => x.Key < order.Price).Sum(x => x.Value.TotalSize) < order.PendingQuantity))
+                    if (!(order.TimeInForce == OrderTimeInForce.FOK && BuyPrice_Level.TakeWhile(x => x.Key >= order.Price).Sum(x => x.Value.TotalSize) < order.PendingQuantity))
                         while (order.PendingQuantity > Zero && BuyPrice_Level.Count > 0)
                         {
-                            var possibleMatches = BuyPrice_Level.Reverse().FirstOrDefault();
+                            var possibleMatches = BuyPrice_Level.FirstOrDefault();
                             if (possibleMatches.Key < order.Price && !isMarketOrder)
                                 break;  //Break as No Match Found for New
 
@@ -466,7 +466,8 @@ namespace COME
                 Finished:
                 this.statistic.CurrentMarketPrice = this.last_Trade_Price;
                 this.LastEventTime = currentTimestamp;
-                await PublishResponseAsync();
+                if (accuireLock)
+                    await PublishResponseAsync();
                 return (true, RequestStatus.Processed, string.Empty);
             }
             catch (Exception ex)
@@ -478,7 +479,8 @@ namespace COME
             }
             finally
             {
-                match_semaphore.Release();
+                if (accuireLock)
+                    match_semaphore.Release();
             }
 
         }
@@ -551,7 +553,7 @@ namespace COME
                 this.statistic.Cancellation++;
                 var currentTimestamp = DateTime.UtcNow;
 
-                this.ResponseBuffer.EventTS = currentTimestamp; 
+                this.ResponseBuffer.EventTS = currentTimestamp;
                 this.ResponseBuffer.EventID = orderID;
                 this.ResponseBuffer.EventType = cancellation;
 
@@ -611,9 +613,12 @@ namespace COME
                                     BuyPrice_Level.Remove(pointer.Price);
                                 else
                                 {
-                                    level.TotalSize -= orderToBeCancelled.PendingQuantity;
                                     level.Orders.Remove(orderToBeCancelled);
                                 }
+
+                                level.TotalSize -= orderToBeCancelled.PendingQuantity;
+
+                                this.ResponseBuffer.UpdatedBuyOrderBook[orderToBeCancelled.Price] = level.TotalSize;
 
                                 orderToBeCancelled.Status = orderToBeCancelled.PendingQuantity == orderToBeCancelled.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
                                 orderToBeCancelled.ModifiedOn = currentTimestamp;
@@ -632,9 +637,11 @@ namespace COME
                                     SellPrice_Level.Remove(pointer.Price);
                                 else
                                 {
-                                    level.TotalSize -= orderToBeCancelled.PendingQuantity;
                                     level.Orders.Remove(orderToBeCancelled);
                                 }
+
+                                level.TotalSize -= orderToBeCancelled.PendingQuantity;
+                                this.ResponseBuffer.UpdatedSellOrderBook[orderToBeCancelled.Price] = level.TotalSize;
 
                                 orderToBeCancelled.Status = orderToBeCancelled.PendingQuantity == orderToBeCancelled.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
                                 orderToBeCancelled.ModifiedOn = currentTimestamp;
@@ -664,150 +671,179 @@ namespace COME
             }
         }
 
-        //public async Task<(bool isProcessed, RequestStatus requestStatus, string message)> UpdateOrderAsync(UpdateOrder updateOrder)
-        //{
-        //    if (!await match_semaphore.WaitAsync(timeout_In_Millisec)) //for overload protection
-        //        return (false, RequestStatus.Timeout, $"rejected : timeout of {timeout_In_Millisec} millisec elapsed.");
-        //    try
-        //    {
-        //        if (string.IsNullOrWhiteSpace(updateOrder.ID))
-        //            return (false, RequestStatus.Rejected, $"rejected : invalid order `id` supplied.");
-        //        if (!OrderIndexer.TryGetValue(updateOrder.ID, out var pointer) || pointer == null)
-        //            return (false, RequestStatus.Rejected, $"rejected : no order with `id` {updateOrder.ID} found.");
+        public async Task<(bool isProcessed, RequestStatus requestStatus, string message)> UpdateOrderAsync(UpdateOrder updateOrder)
+        {
+            if (!await match_semaphore.WaitAsync(timeout_In_Millisec)) //for overload protection
+                return (false, RequestStatus.Timeout, $"rejected : timeout of {timeout_In_Millisec} millisec elapsed.");
+            try
+            {
+                if (string.IsNullOrWhiteSpace(updateOrder.ID))
+                    return (false, RequestStatus.Rejected, $"rejected : invalid order `id` supplied.");
+                if (!OrderIndexer.TryGetValue(updateOrder.ID, out var pointer) || pointer == null)
+                    return (false, RequestStatus.Rejected, $"rejected : no order with `id` {updateOrder.ID} found.");
 
 
-        //        this.statistic.Cancellation++;
-        //        var currentTimestamp = DateTime.UtcNow;
+                this.statistic.Updation++;
+                var currentTimestamp = DateTime.UtcNow;
 
-        //        MatchResponse response = new MatchResponse
-        //        {
-        //            Symbol = this.symbol,
-        //            EventTS = currentTimestamp
-        //        };
+                this.ResponseBuffer.EventTS = currentTimestamp;
+                this.ResponseBuffer.EventID = updateOrder.ID;
+                this.ResponseBuffer.EventType = updation;
 
-        //        if (pointer.IsStopOrder)
-        //        {
+                Order orderToBeUpdated = default;
 
-        //            if (pointer.Side == OrderSide.Buy)
-        //            {
-        //                LinkedList<Order> gropued_list;
-        //                if (Stop_BuyOrdersDict.TryGetValue(pointer.Price, out gropued_list))
-        //                {
-        //                    var orderToBeCancelled = gropued_list.FirstOrDefault(x => x.ID == orderID);
-        //                    if (orderToBeCancelled != null)
-        //                    {
-        //                        if (gropued_list.Count == 1)
-        //                            Stop_BuyOrdersDict.Remove(pointer.Price);
-        //                        else
-        //                            gropued_list.Remove(orderToBeCancelled);
+                if (pointer.IsStopOrder)
+                {
+                    if (pointer.Side == OrderSide.Buy)
+                    {
+                        LinkedList<Order> gropued_list;
+                        if (Stop_BuyOrdersDict.TryGetValue(pointer.Price, out gropued_list))
+                        {
+                            orderToBeUpdated = gropued_list.FirstOrDefault(x => x.ID == updateOrder.ID);
+                            if (orderToBeUpdated != null)
+                            {
+                                if (gropued_list.Count == 1)
+                                    Stop_BuyOrdersDict.Remove(pointer.Price);
+                                else
+                                    gropued_list.Remove(orderToBeUpdated); 
+                            }
+                        }
+                    }
+                    else
+                    {
+                        LinkedList<Order> gropued_list;
+                        if (Stop_SellOrdersDict.TryGetValue(pointer.Price, out gropued_list))
+                        {
+                            orderToBeUpdated = gropued_list.FirstOrDefault(x => x.ID == updateOrder.ID);
+                            if (orderToBeUpdated != null)
+                            {
+                                if (gropued_list.Count == 1)
+                                    Stop_SellOrdersDict.Remove(pointer.Price);
+                                else
+                                    gropued_list.Remove(orderToBeUpdated);
+                                 
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    if (pointer.Side == OrderSide.Buy)
+                    {
 
-        //                        orderToBeCancelled.Status = orderToBeCancelled.PendingQuantity == orderToBeCancelled.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
-        //                        orderToBeCancelled.ModifiedOn = currentTimestamp;
-        //                        response.UpdatedBuyOrders.Add(orderToBeCancelled);
-        //                    }
-        //                }
-        //            }
-        //            else
-        //            {
-        //                LinkedList<Order> gropued_list;
-        //                if (Stop_SellOrdersDict.TryGetValue(pointer.Price, out gropued_list))
-        //                {
-        //                    var orderToBeCancelled = gropued_list.FirstOrDefault(x => x.ID == orderID);
-        //                    if (orderToBeCancelled != null)
-        //                    {
-        //                        if (gropued_list.Count == 1)
-        //                            Stop_SellOrdersDict.Remove(pointer.Price);
-        //                        else
-        //                            gropued_list.Remove(orderToBeCancelled);
+                        if (BuyPrice_Level.TryGetValue(pointer.Price, out var level))
+                        {
+                            orderToBeUpdated = level.Orders.FirstOrDefault(x => x.ID == updateOrder.ID);
+                            if (orderToBeUpdated != null)
+                            {
+                                if (level.Orders.Count == 1 || level.TotalSize == orderToBeUpdated.PendingQuantity)
+                                    BuyPrice_Level.Remove(pointer.Price);
+                                else
+                                {
+                                    level.Orders.Remove(orderToBeUpdated);
+                                }
 
-        //                        orderToBeCancelled.Status = orderToBeCancelled.PendingQuantity == orderToBeCancelled.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
-        //                        orderToBeCancelled.ModifiedOn = currentTimestamp;
-        //                        response.UpdatedSellOrders.Add(orderToBeCancelled);
-        //                    }
-        //                }
-        //            }
-        //        }
-        //        else
-        //        {
-        //            if (pointer.Side == OrderSide.Buy)
-        //            {
+                                level.TotalSize -= orderToBeUpdated.PendingQuantity;
+                                this.ResponseBuffer.UpdatedBuyOrderBook[orderToBeUpdated.Price] = level.TotalSize; 
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (SellPrice_Level.TryGetValue(pointer.Price, out var level))
+                        {
+                            orderToBeUpdated = level.Orders.FirstOrDefault(x => x.ID == updateOrder.ID);
+                            if (orderToBeUpdated != null)
+                            {
+                                if (level.Orders.Count == 1 || level.TotalSize == orderToBeUpdated.PendingQuantity)
+                                    SellPrice_Level.Remove(pointer.Price);
+                                else
+                                {
+                                    level.Orders.Remove(orderToBeUpdated);
+                                }
 
-        //                if (BuyPrice_Level.TryGetValue(pointer.Price, out var level))
-        //                {
-        //                    var orderToBeCancelled = level.Orders.FirstOrDefault(x => x.ID == orderID);
-        //                    if (orderToBeCancelled != null)
-        //                    {
-        //                        if (level.Orders.Count == 1 || level.TotalSize == orderToBeCancelled.PendingQuantity)
-        //                            BuyPrice_Level.Remove(pointer.Price);
-        //                        else
-        //                        {
-        //                            level.TotalSize -= orderToBeCancelled.PendingQuantity;
-        //                            level.Orders.Remove(orderToBeCancelled);
-        //                        }
+                                level.TotalSize -= orderToBeUpdated.PendingQuantity;
+                                this.ResponseBuffer.UpdatedSellOrderBook[orderToBeUpdated.Price] = level.TotalSize; 
+                            }
+                        }
+                    }
+                }
 
-        //                        orderToBeCancelled.Status = orderToBeCancelled.PendingQuantity == orderToBeCancelled.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
-        //                        orderToBeCancelled.ModifiedOn = currentTimestamp;
-        //                        response.UpdatedBuyOrders.Add(orderToBeCancelled);
-        //                    }
-        //                }
-        //            }
-        //            else
-        //            {
-        //                if (SellPrice_Level.TryGetValue(pointer.Price, out var level))
-        //                {
-        //                    var orderToBeCancelled = level.Orders.FirstOrDefault(x => x.ID == orderID);
-        //                    if (orderToBeCancelled != null)
-        //                    {
-        //                        if (level.Orders.Count == 1 || level.TotalSize == orderToBeCancelled.PendingQuantity)
-        //                            SellPrice_Level.Remove(pointer.Price);
-        //                        else
-        //                        {
-        //                            level.TotalSize -= orderToBeCancelled.PendingQuantity;
-        //                            level.Orders.Remove(orderToBeCancelled);
-        //                        }
 
-        //                        orderToBeCancelled.Status = orderToBeCancelled.PendingQuantity == orderToBeCancelled.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
-        //                        orderToBeCancelled.ModifiedOn = currentTimestamp;
-        //                        response.UpdatedSellOrders.Add(orderToBeCancelled);
-        //                    }
-        //                }
-        //            }
-        //        }
-        //        this.LastEventTime = currentTimestamp;
-        //        await PublishMatchAsync();
-        //        return (true, RequestStatus.Processed, string.Empty);
-        //    }
-        //    catch (Exception ex)
-        //    {
-        //        Console.WriteLine($"CancleAsync : {ex.Message}");
 
-        //        return (false, RequestStatus.Exception, $"CancleAsync : {ex.Message}");
+                if (orderToBeUpdated == null)
+                    return (false, RequestStatus.Exception, $"Order with id {updateOrder.ID} not found.");
 
-        //    }
-        //    finally
-        //    {
-        //        if (takeLock)
-        //            match_semaphore.Release();
-        //    }
-        //}
+                var matchedQuantity = (orderToBeUpdated.Quantity - orderToBeUpdated.PendingQuantity);
+
+                if (updateOrder.Quantity == Zero || matchedQuantity >= updateOrder.Quantity)
+                {
+                    orderToBeUpdated.Status = orderToBeUpdated.PendingQuantity == orderToBeUpdated.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
+                    orderToBeUpdated.ModifiedOn = currentTimestamp;
+                    this.ResponseBuffer.UpdatedSellOrders.Add(orderToBeUpdated);
+                }
+                else
+                {
+                    if (updateOrder.Quantity > Zero)
+                    {
+                        orderToBeUpdated.Quantity = (decimal)updateOrder.Quantity;
+                        orderToBeUpdated.PendingQuantity = orderToBeUpdated.Quantity - matchedQuantity;
+                    }
+                    if (updateOrder.Price > Zero)
+                    {
+                        orderToBeUpdated.Price = (decimal)updateOrder.Price;
+                    }
+                    if (updateOrder.TriggerPrice > Zero)
+                    {
+                        orderToBeUpdated.TriggerPrice = (decimal)updateOrder.TriggerPrice;
+                    }
+
+
+                    var matchResponse = await AcceptOrderAndProcessMatchAsync(orderToBeUpdated, accuireLock: false);
+
+                    if (!matchResponse.isProcessed)
+                    {
+                        orderToBeUpdated.Status = orderToBeUpdated.PendingQuantity == orderToBeUpdated.Quantity ? OrderStatus.FullyCancelled : OrderStatus.PartiallyCancelled;
+                        orderToBeUpdated.ModifiedOn = currentTimestamp;
+                        this.ResponseBuffer.UpdatedSellOrders.Add(orderToBeUpdated);
+                    }
+                }
+
+
+                this.LastEventTime = currentTimestamp;
+                await PublishResponseAsync();
+                return (true, RequestStatus.Processed, string.Empty);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"CancleAsync : {ex.Message}");
+
+                return (false, RequestStatus.Exception, $"CancleAsync : {ex.Message}");
+
+            }
+            finally
+            {
+                match_semaphore.Release();
+            }
+        }
 
         async Task PublishResponseAsync()
         {
             await this.Connection.GetSubscriber().PublishAsync(this.response_channel, this.ResponseBuffer.SerializeObject(isFormattingIntended: false));
             this.ResetResponseBuffer();
         }
-        
+
         void ResetResponseBuffer()
         {
             this.ResponseBuffer.EventID = null;
-            this.ResponseBuffer.EventTS = DateTime.MinValue;
             this.ResponseBuffer.EventType = null;
-            this.ResponseBuffer.NewTrades.Clear();
-            this.ResponseBuffer.To= all;
+            this.ResponseBuffer.EventTS = DateTime.MinValue;
+            this.ResponseBuffer.To = all;
             this.ResponseBuffer.UpdatedBuyOrders.Clear();
             this.ResponseBuffer.UpdatedSellOrders.Clear();
+            this.ResponseBuffer.NewTrades.Clear();
             this.ResponseBuffer.UpdatedBuyOrderBook.Clear();
-            this.ResponseBuffer.UpdatedSellOrderBook.Clear();  
+            this.ResponseBuffer.UpdatedSellOrderBook.Clear();
         }
 
         async void CancelAll_DO_Orders_Callback(object state)
@@ -870,7 +906,7 @@ namespace COME
             {
                 this.statistic.Book = this.BuyPrice_Level.Count + this.SellPrice_Level.Count;
                 this.statistic.LastEventTime = this.LastEventTime;
-               
+
                 int stopCount = 0, activeCount = 0;
                 foreach (var index in this.OrderIndexer.Values)
                 {
@@ -878,7 +914,7 @@ namespace COME
                         stopCount++;
                     else
                         activeCount++;
-                } 
+                }
                 this.statistic.StopOrders = stopCount;
                 this.statistic.ActiveOrders = activeCount;
 

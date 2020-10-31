@@ -4,17 +4,21 @@ using System.Text;
 
 namespace COME.Models
 {
-  public class MatchResponse
+    public class MatchResponse
     {
-        public string Symbol { get; set; }
+        public MatchResponse(string symbol)
+        {
+            this.Symbol = symbol;
+        }
+        public readonly string Symbol;
         public DateTime EventTS { get; set; }
-        public string To { get; set; }
+        public string To { get; set; } = "all";
         public string EventType { get; set; }
         public string EventID { get; set; }
-        public List<Order> UpdatedBuyOrders { get; set; } = new List<Order>();
-        public List<Order> UpdatedSellOrders { get; set; } = new List<Order>();
-        public List<Trade> NewTrades { get; set; } = new List<Trade>();
-        public Dictionary<decimal, decimal> UpdatedBuyOrderBook { get; set; } = new Dictionary<decimal, decimal>();
-        public Dictionary<decimal, decimal> UpdatedSellOrderBook { get; set; } = new Dictionary<decimal, decimal>(); 
+        public readonly List<Order> UpdatedBuyOrders = new List<Order>(100);
+        public readonly List<Order> UpdatedSellOrders = new List<Order>(100);
+        public readonly List<Trade> NewTrades = new List<Trade>(100);
+        public readonly Dictionary<decimal, decimal> UpdatedBuyOrderBook = new Dictionary<decimal, decimal>(100);
+        public readonly Dictionary<decimal, decimal> UpdatedSellOrderBook = new Dictionary<decimal, decimal>(100);
     }
 }
