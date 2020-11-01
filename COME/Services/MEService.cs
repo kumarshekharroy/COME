@@ -37,7 +37,7 @@ namespace COME.Services
                 if (Symbol_ME.ContainsKey(symbol))
                     throw new ArgumentException($"matching engine for `{symbol}` is already running.");
 
-                Symbol_ME[symbol] = new ME(symbol:symbol,precision: precision, dustSize: dustSize);
+                Symbol_ME[symbol] = new ME(symbol: symbol, precision: precision, dustSize: dustSize);
             }
         }
 
@@ -64,45 +64,18 @@ namespace COME.Services
                 if (order == null)
                     return (false, RequestStatus.Rejected, "no order payload supplied");
 
-                if (string.IsNullOrWhiteSpace(order.ID))
-                    return (false, RequestStatus.Rejected, "invalid order `id` supplied");
 
-                if (string.IsNullOrWhiteSpace(order.UserID))
-                    return (false, RequestStatus.Rejected, "invalid order `userid` supplied");
+                var validationResult = order.Validate();
+                if (!validationResult.isValid)
+                    return (false, RequestStatus.Rejected, validationResult.errorMessage);
 
-                if (order.Type == OrderType.Unknown)
-                    return (false, RequestStatus.Rejected, "invalid order `type` supplied");
-
-                if (order.Side == OrderSide.Unknown)
-                    return (false, RequestStatus.Rejected, "invalid order `side` supplied");
-
-                if (string.IsNullOrWhiteSpace(order.Symbol))
-                    return (false, RequestStatus.Rejected, "invalid order `symbol` supplied");
-
-
-                order.Symbol = order.Symbol.ToUpper().Trim();
-
-                if (!Symbol_ME.TryGetValue(order.Symbol, out var ME))
+                if (!Symbol_ME.TryGetValue(order.Symbol, out var ME) || ME == null)
                     return (false, RequestStatus.Rejected, $"matching engine for `{order.Symbol}` is not running.");
 
-                order.Price = order.Price.TruncateDecimal(ME.decimal_precision);
-                order.Quantity = order.Quantity.TruncateDecimal(ME.decimal_precision);
-                order.TriggerPrice = order.TriggerPrice.TruncateDecimal(ME.decimal_precision);
 
-
-                if (order.Price <= Zero)
-                    return (false, RequestStatus.Rejected, $"invalid order `price` supplied. val : {order.Price}");
-
-                if (order.Quantity <= Zero)
-                    return (false, RequestStatus.Rejected, $"invalid order `quantity` supplied. val : {order.Quantity}");
-
-                if ((order.Price * order.Quantity).TruncateDecimal(ME.decimal_precision) <= Zero) //optional check
-                    return (false, RequestStatus.Rejected, "order `amount` too low.");
-
-                if (StopOrderTypes.Contains(order.Type) && order.TriggerPrice <= Zero) //optional check
-                    return (false, RequestStatus.Rejected, $"invalid order `triggerprice` supplied. val : {order.TriggerPrice}");
-
-                order.PendingQuantity = order.Quantity;
+                var senitizationResult = order.Senitize(ME);
+                if (!senitizationResult.senitized)
+                    return (false, RequestStatus.Rejected, senitizationResult.errorMessage);
 
                 var match_res = await ME.AcceptOrderAndProcessMatchAsync(order);
                 return (match_res.isProcessed, match_res.requestStatus, match_res.message);
@@ -120,10 +93,10 @@ namespace COME.Services
         public async Task<(bool isProcessed, RequestStatus requestStatus, string message)> CancelOrderAsync(string orderID, string symbol)
         {
             try
-            { 
+            {
                 if (string.IsNullOrWhiteSpace(orderID))
                     return (false, RequestStatus.Rejected, "invalid `orderID` supplied");
-                
+
                 if (string.IsNullOrWhiteSpace(symbol))
                     return (false, RequestStatus.Rejected, "invalid `symbol` supplied");
 
@@ -133,7 +106,7 @@ namespace COME.Services
                 if (!Symbol_ME.TryGetValue(symbol, out var ME))
                     return (false, RequestStatus.Rejected, $"matching engine for `{symbol}` is not running.");
 
-                 
+
                 var cancellation_res = await ME.CancleOrderAsync(orderID);
                 return (cancellation_res.isProcessed, cancellation_res.requestStatus, cancellation_res.message);
 

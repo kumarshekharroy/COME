@@ -1,6 +1,8 @@
 ﻿using COME.Models;
 using COME.Utilities;
 
+using Newtonsoft.Json;
+
 using StackExchange.Redis;
 
 using System;
@@ -19,14 +21,15 @@ namespace COME
         public readonly decimal dust_size;
         readonly string symbol;
         readonly string response_channel;
-        readonly string request_cancellation_channel;
-        readonly string request_neworder_channel;
         readonly System.Threading.Timer zero_O_Clock_Timer = null;
         readonly System.Threading.Timer one_Sec_Timer = null;
 
+        const string channel_cancellation_req_suffix = ".request.cancellation";
+        const string channel_neworder_req_suffix = ".request.neworder";
+        const string channel_dump_req_suffix = ".request.dump";
 
-        readonly HashSet<OrderType> StopOrderTypes = new HashSet<OrderType> { OrderType.StopLimit, OrderType.StopMarket };
-        readonly HashSet<OrderType> MarketOrderTypes = new HashSet<OrderType> { OrderType.StopMarket, OrderType.Market };
+        public readonly HashSet<OrderType> StopOrderTypes = new HashSet<OrderType> { OrderType.StopLimit, OrderType.StopMarket };
+        public readonly HashSet<OrderType> MarketOrderTypes = new HashSet<OrderType> { OrderType.StopMarket, OrderType.Market };
 
         DateTime LastEventTime = DateTime.MinValue;
         decimal last_Trade_Price = 0M;
@@ -34,7 +37,7 @@ namespace COME
 
         readonly SemaphoreSlim match_semaphore = new SemaphoreSlim(1, 1);
         readonly int timeout_In_Millisec = 5000;
-        const decimal Zero = 0M;
+        public const decimal Zero = 0M;
         const string all = "all";
 
         const string match = "match";
@@ -46,7 +49,7 @@ namespace COME
 
         readonly MatchResponse ResponseBuffer;
 
-
+        readonly List<string> RequestChannels = new List<string>(3);
         readonly SortedDictionary<decimal, Level> BuyPrice_Level = new SortedDictionary<decimal, Level>(new DescendingComparer<decimal>());
         readonly SortedDictionary<decimal, Level> SellPrice_Level = new SortedDictionary<decimal, Level>();
 
@@ -68,9 +71,10 @@ namespace COME
 
             this.ResponseBuffer = new MatchResponse(this.symbol);
 
+            RequestChannels.Add(channel_cancellation_req_suffix);
+            RequestChannels.Add(channel_neworder_req_suffix);
+            RequestChannels.Add(channel_dump_req_suffix);
 
-            this.request_cancellation_channel = string.Concat(this.symbol, ".request.cancellation");
-            this.request_neworder_channel = string.Concat(this.symbol, ".request.neworder");
             this.response_channel = string.Concat(this.symbol, ".response");
 
             ConfigurationOptions options = new ConfigurationOptions()
@@ -101,6 +105,59 @@ namespace COME
                 Console.WriteLine($"Redis {options.ClientName} : {DateTime.UtcNow} => ErrorMessage : { args.Message}");
             };
 
+            foreach (var channelsuffix in RequestChannels)
+            {
+                this.Connection.GetSubscriber().SubscribeAsync(string.Concat(this.symbol, channelsuffix), async (chan, msg) =>
+                 {
+                     try
+                     {
+                         switch (channelsuffix)
+                         {
+                             case channel_neworder_req_suffix:
+                                 {
+                                     var order = JsonConvert.DeserializeObject<Order>(msg);
+
+                                     if (order == null)
+                                         return;
+
+                                     var validationResult = order.Validate();
+                                     if (!validationResult.isValid)
+                                         return;
+
+                                     var senitizationResult = order.Senitize(this);
+                                     if (!senitizationResult.senitized)
+                                         return;
+
+                                     await this.AcceptOrderAndProcessMatchAsync(order);
+                                 }
+                                 break;
+
+                             case channel_cancellation_req_suffix:
+                                 {
+                                     await CancleOrderAsync(msg);
+                                 }
+                                 break;
+
+                             case channel_dump_req_suffix:
+                                 //ToDoDump
+                                 break;
+
+                             default:
+                                 Console.WriteLine($"SubscribeAsync : Unknown Channel : {chan} : \nMsg : {msg} ");
+                                 break;
+                         }
+                     }
+                     catch (Exception ex)
+                     {
+                         Console.WriteLine($"SubscribeAsync : Channel : {chan} : \nMsg : {msg}  : \nEx : {ex.Message}");
+                     }
+
+
+
+                 }).ConfigureAwait(false).GetAwaiter().GetResult();
+            }
+
+
             var currentTime = DateTime.UtcNow;
 
 
@@ -108,6 +165,8 @@ namespace COME
             zero_O_Clock_Timer = new Timer(CancelAll_DO_Orders_Callback, null, TimeSpan.FromMilliseconds((dueDay - currentTime).TotalMilliseconds), TimeSpan.FromDays(1)); //every day 
             one_Sec_Timer = new Timer(One_Sec_Timer_Callback, null, TimeSpan.FromMilliseconds(timeout_In_Millisec), TimeSpan.FromSeconds(1)); //every sec 
         }
+
+
 
         public async Task<(bool isProcessed, RequestStatus requestStatus, string message)> AcceptOrderAndProcessMatchAsync(Order order, bool accuireLock = true, bool force = false)
         {
@@ -117,6 +176,11 @@ namespace COME
 
             try
             {
+
+                if (OrderIndexer.ContainsKey(order.ID))
+                    return (false, RequestStatus.Rejected, $"rejected : duplicate order id : {order.ID}.");
+
+
                 this.statistic.Submission++;
                 var currentTimestamp = DateTime.UtcNow;
 
@@ -140,9 +204,6 @@ namespace COME
                             if (order.TriggerPrice <= last_Trade_Price) // buy order :  market price is already breaching trigger price 
                             {
                                 order.IsStopActivated = true;
-
-                                //   _ = EnqueueForMatchAsync(order);
-
                             }
                             else
                             {
@@ -168,9 +229,6 @@ namespace COME
                             if (order.TriggerPrice >= last_Trade_Price) // sell order :  market price is already breaching trigger price 
                             {
                                 order.IsStopActivated = true;
-
-                                //  _ = EnqueueForMatchAsync(order);
-
                             }
                             else
                             {
@@ -533,7 +591,7 @@ namespace COME
 
         }
 
-        public async Task<(bool isProcessed, RequestStatus requestStatus, string message)> EnqueueForMatchAsync(Order order)
+        async Task<(bool isProcessed, RequestStatus requestStatus, string message)> EnqueueForMatchAsync(Order order)
         {
             return await Task.Run(async () => await AcceptOrderAndProcessMatchAsync(order, force: true));
         }
@@ -705,7 +763,7 @@ namespace COME
                                 if (gropued_list.Count == 1)
                                     Stop_BuyOrdersDict.Remove(pointer.Price);
                                 else
-                                    gropued_list.Remove(orderToBeUpdated); 
+                                    gropued_list.Remove(orderToBeUpdated);
                             }
                         }
                     }
@@ -721,7 +779,7 @@ namespace COME
                                     Stop_SellOrdersDict.Remove(pointer.Price);
                                 else
                                     gropued_list.Remove(orderToBeUpdated);
-                                 
+
                             }
                         }
                     }
@@ -744,7 +802,7 @@ namespace COME
                                 }
 
                                 level.TotalSize -= orderToBeUpdated.PendingQuantity;
-                                this.ResponseBuffer.UpdatedBuyOrderBook[orderToBeUpdated.Price] = level.TotalSize; 
+                                this.ResponseBuffer.UpdatedBuyOrderBook[orderToBeUpdated.Price] = level.TotalSize;
                             }
                         }
                     }
@@ -763,7 +821,7 @@ namespace COME
                                 }
 
                                 level.TotalSize -= orderToBeUpdated.PendingQuantity;
-                                this.ResponseBuffer.UpdatedSellOrderBook[orderToBeUpdated.Price] = level.TotalSize; 
+                                this.ResponseBuffer.UpdatedSellOrderBook[orderToBeUpdated.Price] = level.TotalSize;
                             }
                         }
                     }
