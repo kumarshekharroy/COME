@@ -52,7 +52,7 @@ namespace COME
 
 
         readonly SortedDictionary<decimal, LinkedList<Order>> Stop_BuyOrdersDict = new SortedDictionary<decimal, LinkedList<Order>>();
-        readonly SortedDictionary<decimal, LinkedList<Order>> Stop_SellOrdersDict = new SortedDictionary<decimal, LinkedList<Order>>();
+        readonly SortedDictionary<decimal, LinkedList<Order>> Stop_SellOrdersDict = new SortedDictionary<decimal, LinkedList<Order>>(new DescendingComparer<decimal>());
 
 
         readonly Dictionary<string, OrderPointer> OrderIndexer = new Dictionary<string, OrderPointer>();
@@ -493,11 +493,11 @@ namespace COME
             //market price going down
             do
             {
-                var stopprice = Stop_SellOrdersDict.Keys.Reverse().FirstOrDefault();
-                if (min_trade_price > stopprice)
+                var stopprice_orders = Stop_SellOrdersDict.FirstOrDefault();
+                if (min_trade_price > stopprice_orders.Key)
                     break;  //Break as No StopSell Order above Current/Min Trading price;
 
-                foreach (var order in Stop_SellOrdersDict[stopprice])
+                foreach (var order in stopprice_orders.Value)
                 {
                     order.IsStopActivated = true;
                     order.ModifiedOn = currentTime;
@@ -507,17 +507,17 @@ namespace COME
                     _ = EnqueueForMatchAsync(order);
                 }
 
-                Stop_SellOrdersDict.Remove(stopprice);
+                Stop_SellOrdersDict.Remove(stopprice_orders.Key);
             } while (true);
 
             //market price going up
             do
             {
-                var stopprice = Stop_BuyOrdersDict.Keys.FirstOrDefault();
-                if (stopprice == 0 || stopprice > max_trade_price)
+                var stopprice_orders = Stop_BuyOrdersDict.FirstOrDefault();
+                if (stopprice_orders.Key == 0 || stopprice_orders.Key > max_trade_price)
                     break;  //Break as No StopLimitBuy Order below Current/Max Trading price;
 
-                foreach (var order in Stop_BuyOrdersDict[stopprice])
+                foreach (var order in stopprice_orders.Value)
                 {
                     order.IsStopActivated = true;
                     order.ModifiedOn = currentTime;
@@ -527,7 +527,7 @@ namespace COME
                     _ = EnqueueForMatchAsync(order);
                 }
 
-                Stop_BuyOrdersDict.Remove(stopprice);
+                Stop_BuyOrdersDict.Remove(stopprice_orders.Key);
 
             } while (true);
 
