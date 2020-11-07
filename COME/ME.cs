@@ -7,7 +7,7 @@ using StackExchange.Redis;
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
+using System.Linq; 
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -139,7 +139,9 @@ namespace COME
                                  break;
 
                              case channel_dump_req_suffix:
-                                 //ToDoDump
+                                 {
+                                     await DumpAsync(msg);
+                                 }
                                  break;
 
                              default:
@@ -166,7 +168,70 @@ namespace COME
             one_Sec_Timer = new Timer(One_Sec_Timer_Callback, null, TimeSpan.FromMilliseconds(timeout_In_Millisec), TimeSpan.FromSeconds(1)); //every sec 
         }
 
+        public async Task DumpAsync(string to = "all")
+        {
+            if (!await match_semaphore.WaitAsync(timeout_In_Millisec))
+                return;
+            try
+            {
+                var batchSize = 5000;
+                var currentTime = DateTime.UtcNow;
+                int totalOrderCount = this.OrderIndexer.Count;
+                int orderNo = 0;
 
+
+                ResponseBuffer.To = to;
+                ResponseBuffer.EventType = dump_init;
+                ResponseBuffer.EventTS = currentTime;
+                await PublishResponseAsync();
+
+                foreach (var level in BuyPrice_Level.Values.Concat(SellPrice_Level.Values))
+                {
+                    foreach (var order in level.Orders)
+                    {
+                        await PublishDump(order);
+                    }
+                }
+
+                foreach (var Orders in Stop_BuyOrdersDict.Values.Concat(Stop_SellOrdersDict.Values))
+                {
+                    foreach (var order in Orders)
+                    {
+                        await PublishDump(order);
+                    }
+                }
+
+
+                ResponseBuffer.To = to;
+                ResponseBuffer.EventType = dump_complete;
+                ResponseBuffer.EventTS = currentTime;
+                await PublishResponseAsync();
+
+                async Task PublishDump(Order order)
+                {
+                    if (order.Side == OrderSide.Buy)
+                        ResponseBuffer.UpdatedBuyOrders.Add(order);
+                    else
+                        ResponseBuffer.UpdatedSellOrders.Add(order);
+                    if (++orderNo % batchSize == 0 || orderNo == totalOrderCount)
+                    {
+                        ResponseBuffer.To = to;
+                        ResponseBuffer.EventType = dump;
+                        ResponseBuffer.EventTS = currentTime;
+                        await PublishResponseAsync();
+                    }
+                }
+
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"DumpAsync : {ex.Message}");
+            }
+            finally
+            {
+                match_semaphore.Release();
+            }
+        }
 
         public async Task<(bool isProcessed, RequestStatus requestStatus, string message)> AcceptOrderAndProcessMatchAsync(Order order, bool accuireLock = true, bool force = false)
         {
@@ -403,7 +468,7 @@ namespace COME
                 else
                 {
                     this.ResponseBuffer.UpdatedSellOrders.Add((Order)order.Clone());
-                  
+
                     if (order.TimeInForce == OrderTimeInForce.FOK && BuyPrice_Level.TakeWhile(x => x.Key >= order.Price).Sum(x => x.Value.TotalSize) < order.PendingQuantity)
                     {
                         order.Status = OrderStatus.FullyCancelled;
