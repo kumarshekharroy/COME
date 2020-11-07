@@ -265,97 +265,109 @@ namespace COME
                 {
                     this.ResponseBuffer.UpdatedBuyOrders.Add((Order)order.Clone());
 
-                    if (!(order.TimeInForce == OrderTimeInForce.FOK && SellPrice_Level.TakeWhile(x => x.Key <= order.Price).Sum(x => x.Value.TotalSize) < order.PendingQuantity))
-                        while (order.PendingQuantity > Zero && SellPrice_Level.Count > 0)
+                    if (order.TimeInForce == OrderTimeInForce.FOK && SellPrice_Level.TakeWhile(x => x.Key <= order.Price).Sum(x => x.Value.TotalSize) < order.PendingQuantity)
+                    {
+                        order.Status = OrderStatus.FullyCancelled;
+                        this.ResponseBuffer.UpdatedBuyOrders.Add(order);
+                        goto Finished;
+                    }
+                    while (order.PendingQuantity > Zero && SellPrice_Level.Count > 0)
+                    {
+                        var possibleMatches = SellPrice_Level.FirstOrDefault();
+                        if (possibleMatches.Key > order.Price && !isMarketOrder)
+                            break;  //Break as No Match Found for New
+
+                        if (order.IsPostOnly)
                         {
-                            var possibleMatches = SellPrice_Level.FirstOrDefault();
-                            if (possibleMatches.Key > order.Price && !isMarketOrder)
-                                break;  //Break as No Match Found for New
+                            order.Status = OrderStatus.FullyCancelled;
+                            this.ResponseBuffer.UpdatedBuyOrders.Add(order);
+                            break;
+                        }
 
-                            var level = possibleMatches.Value;
-                            var sellOrder_Node = level.Orders.First;
+                        var level = possibleMatches.Value;
+                        var sellOrder_Node = level.Orders.First;
 
-                            while (sellOrder_Node != null)
+                        while (sellOrder_Node != null)
+                        {
+                            var currentTime = DateTime.UtcNow;
+
+                            var next_Node = sellOrder_Node.Next;
+
+                            var sellOrder = sellOrder_Node.Value;
+                            if ((sellOrder.PendingQuantity * sellOrder.Price).TruncateDecimal(decimal_precision) < dust_size)
                             {
-                                var currentTime = DateTime.UtcNow;
+                                sellOrder.Status = OrderStatus.PartiallyCancelled;
+                                OrderIndexer.Remove(sellOrder.ID);
+                                this.ResponseBuffer.UpdatedSellOrders.Add(sellOrder);
 
-                                var next_Node = sellOrder_Node.Next;
+                                level.TotalSize -= sellOrder.PendingQuantity;
+                                this.ResponseBuffer.UpdatedSellOrderBook[sellOrder.Price] = level.TotalSize;
 
-                                var sellOrder = sellOrder_Node.Value;
-                                if ((sellOrder.PendingQuantity * sellOrder.Price).TruncateDecimal(decimal_precision) < dust_size)
+                                this.statistic.DustOrders++;
+                            }
+                            else
+                            {
+                                var tradeSize = Math.Min(sellOrder.PendingQuantity, order.PendingQuantity);
+
+                                sellOrder.Status = sellOrder.PendingQuantity == tradeSize ? OrderStatus.FullyFilled : OrderStatus.PartiallyFilled;
+                                sellOrder.PendingQuantity -= tradeSize;
+                                sellOrder.ModifiedOn = currentTime;
+
+                                order.Status = order.PendingQuantity == tradeSize ? OrderStatus.FullyFilled : OrderStatus.PartiallyFilled;
+                                order.PendingQuantity -= tradeSize;
+                                order.ModifiedOn = currentTime;
+
+                                level.TotalSize -= tradeSize;
+                                this.ResponseBuffer.UpdatedSellOrderBook[sellOrder.Price] = level.TotalSize;
+
+                                var trade = new Trade
                                 {
-                                    sellOrder.Status = OrderStatus.PartiallyCancelled;
-                                    OrderIndexer.Remove(sellOrder.ID);
-                                    this.ResponseBuffer.UpdatedSellOrders.Add(sellOrder);
+                                    TimeStamp = currentTime,
+                                    BuyOrderID = order.ID,
+                                    SellOrderID = sellOrder.ID,
+                                    ExecutionSide = order.Side,
+                                    Price = sellOrder.Price,
+                                    Quantity = tradeSize,
+                                    BuyerID = order.UserID,
+                                    SellerID = sellOrder.UserID,
+                                };
+                                this.ResponseBuffer.UpdatedBuyOrders.Add((Order)order.Clone());
+                                this.ResponseBuffer.UpdatedSellOrders.Add((Order)sellOrder.Clone());
+                                this.ResponseBuffer.NewTrades.Add(trade);
 
-                                    level.TotalSize -= sellOrder.PendingQuantity;
-                                    this.ResponseBuffer.UpdatedSellOrderBook[sellOrder.Price] = level.TotalSize;
+                                last_Trade_Price = trade.Price;
 
-                                    this.statistic.DustOrders++;
+                                if (min_trade_price > last_Trade_Price || min_trade_price == Zero)
+                                    min_trade_price = last_Trade_Price;
+
+                                if (max_trade_price < last_Trade_Price)
+                                    max_trade_price = last_Trade_Price;
+
+                                this.statistic.Trades++;
+                            }
+
+                            if (EnumHelper.IsDeadOrder(sellOrder.Status))
+                            {
+                                OrderIndexer.Remove(sellOrder.ID);
+
+                                if (level.Orders.Count == 1)
+                                {
+                                    SellPrice_Level.Remove(sellOrder.Price); //The Order was Only Order at the given rate;
+                                    break;//Break from foreach as No Pending Order at given rate
                                 }
                                 else
                                 {
-                                    var tradeSize = Math.Min(sellOrder.PendingQuantity, order.PendingQuantity);
-
-                                    sellOrder.Status = sellOrder.PendingQuantity == tradeSize ? OrderStatus.FullyFilled : OrderStatus.PartiallyFilled;
-                                    sellOrder.PendingQuantity -= tradeSize;
-                                    sellOrder.ModifiedOn = currentTime;
-
-                                    order.Status = order.PendingQuantity == tradeSize ? OrderStatus.FullyFilled : OrderStatus.PartiallyFilled;
-                                    order.PendingQuantity -= tradeSize;
-                                    order.ModifiedOn = currentTime;
-
-                                    level.TotalSize -= tradeSize;
-                                    this.ResponseBuffer.UpdatedSellOrderBook[sellOrder.Price] = level.TotalSize;
-
-                                    var trade = new Trade
-                                    {
-                                        TimeStamp = currentTime,
-                                        BuyOrderID = order.ID,
-                                        SellOrderID = sellOrder.ID,
-                                        ExecutionSide = order.Side,
-                                        Price = sellOrder.Price,
-                                        Quantity = tradeSize,
-                                        BuyerID = order.UserID,
-                                        SellerID = sellOrder.UserID,
-                                    };
-                                    this.ResponseBuffer.UpdatedBuyOrders.Add((Order)order.Clone());
-                                    this.ResponseBuffer.UpdatedSellOrders.Add((Order)sellOrder.Clone());
-                                    this.ResponseBuffer.NewTrades.Add(trade);
-
-                                    last_Trade_Price = trade.Price;
-
-                                    if (min_trade_price > last_Trade_Price || min_trade_price == Zero)
-                                        min_trade_price = last_Trade_Price;
-
-                                    if (max_trade_price < last_Trade_Price)
-                                        max_trade_price = last_Trade_Price;
-
-                                    this.statistic.Trades++;
+                                    level.Orders.Remove(sellOrder_Node);
                                 }
-
-                                if (EnumHelper.IsDeadOrder(sellOrder.Status))
-                                {
-                                    OrderIndexer.Remove(sellOrder.ID);
-
-                                    if (level.Orders.Count == 1)
-                                    {
-                                        SellPrice_Level.Remove(sellOrder.Price); //The Order was Only Order at the given rate;
-                                        break;//Break from foreach as No Pending Order at given rate
-                                    }
-                                    else
-                                    {
-                                        level.Orders.Remove(sellOrder_Node);
-                                    }
-                                }
-
-                                if (order.Status == OrderStatus.FullyFilled)
-                                    break;  //Break as Completely Matched New
-
-                                sellOrder_Node = next_Node;
-
                             }
+
+                            if (order.Status == OrderStatus.FullyFilled)
+                                break;  //Break as Completely Matched New
+
+                            sellOrder_Node = next_Node;
+
                         }
+                    }
 
                     if (!EnumHelper.IsDeadOrder(order.Status))
                     {
@@ -391,102 +403,115 @@ namespace COME
                 else
                 {
                     this.ResponseBuffer.UpdatedSellOrders.Add((Order)order.Clone());
-                    if (!(order.TimeInForce == OrderTimeInForce.FOK && BuyPrice_Level.TakeWhile(x => x.Key >= order.Price).Sum(x => x.Value.TotalSize) < order.PendingQuantity))
-                        while (order.PendingQuantity > Zero && BuyPrice_Level.Count > 0)
+                  
+                    if (order.TimeInForce == OrderTimeInForce.FOK && BuyPrice_Level.TakeWhile(x => x.Key >= order.Price).Sum(x => x.Value.TotalSize) < order.PendingQuantity)
+                    {
+                        order.Status = OrderStatus.FullyCancelled;
+                        this.ResponseBuffer.UpdatedSellOrders.Add(order);
+                        goto Finished;
+                    }
+
+                    while (order.PendingQuantity > Zero && BuyPrice_Level.Count > 0)
+                    {
+                        var possibleMatches = BuyPrice_Level.FirstOrDefault();
+                        if (possibleMatches.Key < order.Price && !isMarketOrder)
+                            break;  //Break as No Match Found for New
+
+                        if (order.IsPostOnly)
                         {
-                            var possibleMatches = BuyPrice_Level.FirstOrDefault();
-                            if (possibleMatches.Key < order.Price && !isMarketOrder)
-                                break;  //Break as No Match Found for New
+                            order.Status = OrderStatus.FullyCancelled;
+                            this.ResponseBuffer.UpdatedSellOrders.Add(order);
+                            break;
+                        }
 
+                        var level = possibleMatches.Value;
 
-                            var level = possibleMatches.Value;
+                        var buyOrder_Node = level.Orders.First;
 
-                            var buyOrder_Node = level.Orders.First;
+                        while (buyOrder_Node != null)
+                        {
+                            var currentTime = DateTime.UtcNow;
 
-                            while (buyOrder_Node != null)
+                            var next_Node = buyOrder_Node.Next;
+
+                            var buyOrder = buyOrder_Node.Value;
+                            if ((buyOrder.PendingQuantity * buyOrder.Price).TruncateDecimal(decimal_precision) < dust_size)
                             {
-                                var currentTime = DateTime.UtcNow;
+                                buyOrder.Status = OrderStatus.PartiallyCancelled;
+                                OrderIndexer.Remove(buyOrder.ID);
+                                this.ResponseBuffer.UpdatedBuyOrders.Add(buyOrder);
 
-                                var next_Node = buyOrder_Node.Next;
+                                level.TotalSize -= buyOrder.PendingQuantity;
+                                this.ResponseBuffer.UpdatedBuyOrderBook[buyOrder.Price] = level.TotalSize;
 
-                                var buyOrder = buyOrder_Node.Value;
-                                if ((buyOrder.PendingQuantity * buyOrder.Price).TruncateDecimal(decimal_precision) < dust_size)
+                                this.statistic.DustOrders++;
+                            }
+                            else
+                            {
+                                var tradeSize = Math.Min(buyOrder.PendingQuantity, order.PendingQuantity);
+
+                                buyOrder.Status = buyOrder.PendingQuantity == tradeSize ? OrderStatus.FullyFilled : OrderStatus.PartiallyFilled;
+                                buyOrder.PendingQuantity -= tradeSize;
+                                buyOrder.ModifiedOn = currentTime;
+
+                                order.Status = order.PendingQuantity == tradeSize ? OrderStatus.FullyFilled : OrderStatus.PartiallyFilled;
+                                order.PendingQuantity -= tradeSize;
+                                order.ModifiedOn = currentTime;
+
+
+                                level.TotalSize -= tradeSize;
+                                this.ResponseBuffer.UpdatedBuyOrderBook[buyOrder.Price] = level.TotalSize;
+
+                                var trade = new Trade
                                 {
-                                    buyOrder.Status = OrderStatus.PartiallyCancelled;
-                                    OrderIndexer.Remove(buyOrder.ID);
-                                    this.ResponseBuffer.UpdatedBuyOrders.Add(buyOrder);
+                                    TimeStamp = currentTime,
+                                    SellOrderID = order.ID,
+                                    BuyOrderID = buyOrder.ID,
+                                    ExecutionSide = order.Side,
+                                    Price = buyOrder.Price,
+                                    Quantity = tradeSize,
+                                    SellerID = order.UserID,
+                                    BuyerID = buyOrder.UserID,
+                                };
 
-                                    level.TotalSize -= buyOrder.PendingQuantity;
-                                    this.ResponseBuffer.UpdatedBuyOrderBook[buyOrder.Price] = level.TotalSize;
+                                this.ResponseBuffer.UpdatedSellOrders.Add((Order)order.Clone());
+                                this.ResponseBuffer.UpdatedBuyOrders.Add((Order)buyOrder.Clone());
+                                this.ResponseBuffer.NewTrades.Add(trade);
 
-                                    this.statistic.DustOrders++;
+                                last_Trade_Price = trade.Price;
+
+                                if (min_trade_price > last_Trade_Price || min_trade_price == Zero)
+                                    min_trade_price = last_Trade_Price;
+
+                                if (max_trade_price < last_Trade_Price)
+                                    max_trade_price = last_Trade_Price;
+
+                                this.statistic.Trades++;
+                            }
+
+                            if (EnumHelper.IsDeadOrder(buyOrder.Status))
+                            {
+                                OrderIndexer.Remove(buyOrder.ID);
+
+                                if (level.Orders.Count == 1 || level.TotalSize == Zero)
+                                {
+                                    BuyPrice_Level.Remove(buyOrder.Price); //The Order was Only Order at the given rate;
+                                    break;//Break from foreach as No Pending Order at given rate
                                 }
                                 else
                                 {
-                                    var tradeSize = Math.Min(buyOrder.PendingQuantity, order.PendingQuantity);
-
-                                    buyOrder.Status = buyOrder.PendingQuantity == tradeSize ? OrderStatus.FullyFilled : OrderStatus.PartiallyFilled;
-                                    buyOrder.PendingQuantity -= tradeSize;
-                                    buyOrder.ModifiedOn = currentTime;
-
-                                    order.Status = order.PendingQuantity == tradeSize ? OrderStatus.FullyFilled : OrderStatus.PartiallyFilled;
-                                    order.PendingQuantity -= tradeSize;
-                                    order.ModifiedOn = currentTime;
-
-
-                                    level.TotalSize -= tradeSize;
-                                    this.ResponseBuffer.UpdatedBuyOrderBook[buyOrder.Price] = level.TotalSize;
-
-                                    var trade = new Trade
-                                    {
-                                        TimeStamp = currentTime,
-                                        SellOrderID = order.ID,
-                                        BuyOrderID = buyOrder.ID,
-                                        ExecutionSide = order.Side,
-                                        Price = buyOrder.Price,
-                                        Quantity = tradeSize,
-                                        SellerID = order.UserID,
-                                        BuyerID = buyOrder.UserID,
-                                    };
-
-                                    this.ResponseBuffer.UpdatedSellOrders.Add((Order)order.Clone());
-                                    this.ResponseBuffer.UpdatedBuyOrders.Add((Order)buyOrder.Clone());
-                                    this.ResponseBuffer.NewTrades.Add(trade);
-
-                                    last_Trade_Price = trade.Price;
-
-                                    if (min_trade_price > last_Trade_Price || min_trade_price == Zero)
-                                        min_trade_price = last_Trade_Price;
-
-                                    if (max_trade_price < last_Trade_Price)
-                                        max_trade_price = last_Trade_Price;
-
-                                    this.statistic.Trades++;
+                                    level.Orders.Remove(buyOrder_Node);
                                 }
-
-                                if (EnumHelper.IsDeadOrder(buyOrder.Status))
-                                {
-                                    OrderIndexer.Remove(buyOrder.ID);
-
-                                    if (level.Orders.Count == 1 || level.TotalSize == Zero)
-                                    {
-                                        BuyPrice_Level.Remove(buyOrder.Price); //The Order was Only Order at the given rate;
-                                        break;//Break from foreach as No Pending Order at given rate
-                                    }
-                                    else
-                                    {
-                                        level.Orders.Remove(buyOrder_Node);
-                                    }
-
-                                }
-
-                                if (order.Status == OrderStatus.FullyFilled)
-                                    break;  //Break as Completely Matched New
-
-                                buyOrder_Node = next_Node;
 
                             }
+
+                            if (order.Status == OrderStatus.FullyFilled)
+                                break;  //Break as Completely Matched New
+
+                            buyOrder_Node = next_Node;
+
                         }
+                    }
                     if (!EnumHelper.IsDeadOrder(order.Status))
                     {
                         if (isMarketOrder || order.TimeInForce == OrderTimeInForce.IOC || order.TimeInForce == OrderTimeInForce.FOK)

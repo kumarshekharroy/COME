@@ -8,6 +8,7 @@ namespace COME.Models
 {
     public class Order : ICloneable
     {
+        static readonly HashSet<OrderType> LimitOrderTypes = new HashSet<OrderType> { OrderType.StopLimit, OrderType.Limit };
         public string ID { get; set; }
         public string UserID { get; set; }
         public string Symbol { get; set; }
@@ -22,13 +23,14 @@ namespace COME.Models
         public DateTime ModifiedOn { get; set; }
         public OrderStatus Status { get; set; }
         public OrderTimeInForce TimeInForce { get; set; }
+        public bool IsPostOnly { get; set; }
 
         public object Clone()
         {
             return this.MemberwiseClone();
         }
 
-     public   (bool isValid, string errorMessage) Validate()
+        public (bool isValid, string errorMessage) Validate()
         {
 
             if (string.IsNullOrWhiteSpace(this.ID))
@@ -39,6 +41,9 @@ namespace COME.Models
 
             if (this.Type == OrderType.Unknown)
                 return (false, "invalid order `type` supplied");
+
+            if (this.IsPostOnly && !LimitOrderTypes.Contains(this.Type))
+                return (false, "invalid order `type` supplied. PostOnly order for the order type is not supported.");
 
             if (this.Side == OrderSide.Unknown)
                 return (false, "invalid order `side` supplied");
@@ -53,7 +58,7 @@ namespace COME.Models
 
         }
 
-       public (bool senitized, string errorMessage) Senitize(ME me)
+        public (bool senitized, string errorMessage) Senitize(ME me)
         {
             this.Price = this.Price.TruncateDecimal(me.decimal_precision);
             this.Quantity = this.Quantity.TruncateDecimal(me.decimal_precision);
